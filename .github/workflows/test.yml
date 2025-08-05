@@ -1,0 +1,128 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run lint
+      run: npm run lint
+    
+    - name: Run type check
+      run: npx tsc --noEmit
+    
+    - name: Run tests with coverage
+      run: npm run test:ci
+      env:
+        CI: true
+    
+    - name: Check coverage thresholds
+      run: |
+        echo "Checking coverage thresholds..."
+        node -e "
+          const fs = require('fs');
+          const coverage = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+          const thresholds = { branches: 100, functions: 100, lines: 100, statements: 100 };
+          
+          let failed = false;
+          for (const [type, threshold] of Object.entries(thresholds)) {
+            const actual = coverage.total[type].pct;
+            console.log(\`\${type}: \${actual}% (required: \${threshold}%)\`);
+            if (actual < threshold) {
+              console.error(\`❌ \${type} coverage \${actual}% is below threshold \${threshold}%\`);
+              failed = true;
+            } else {
+              console.log(\`✅ \${type} coverage \${actual}% meets threshold \${threshold}%\`);
+            }
+          }
+          
+          if (failed) {
+            console.error('\\n❌ Coverage thresholds not met!');
+            process.exit(1);
+          } else {
+            console.log('\\n✅ All coverage thresholds met!');
+          }
+        "
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage/lcov.info
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+    
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-reports-${{ matrix.node-version }}
+        path: |
+          coverage/
+          !coverage/tmp/
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.node-version }}
+        path: |
+          coverage/html-report/
+          jest-results.xml
+          
+  coverage-report:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Download coverage reports
+      uses: actions/download-artifact@v3
+      with:
+        name: coverage-reports-18.x
+        path: coverage/
+    
+    - name: Coverage Summary
+      run: |
+        if [ -f coverage/coverage-summary.json ]; then
+          echo "## 📊 Test Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          node -e "
+            const fs = require('fs');
+            const coverage = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+            const total = coverage.total;
+            
+            console.log('| Metric | Coverage | Status |');
+            console.log('|--------|----------|--------|');
+            
+            const metrics = ['statements', 'branches', 'functions', 'lines'];
+            metrics.forEach(metric => {
+              const pct = total[metric].pct;
+              const status = pct === 100 ? '✅ Perfect' : pct >= 90 ? '🟢 Good' : pct >= 80 ? '🟡 Fair' : '🔴 Poor';
+              console.log(\`| \${metric.charAt(0).toUpperCase() + metric.slice(1)} | \${pct}% | \${status} |\`);
+            });
+          " >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Coverage summary not found" >> $GITHUB_STEP_SUMMARY
+        fi
